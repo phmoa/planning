@@ -1,0 +1,18 @@
+---
+# Dossier de déploiement du script sur le serveur cible.
+# Le script crée ./logs et ses fichiers temporaires dans ce dossier.
+reprise_planning_script_dir: /as_shared/tailored/custom/batchs/reprise_planning
+reprise_planning_script_name: reprise_planning.ksh
+
+# Propriétaire / groupe du script (laisser vide pour ne pas les forcer)
+reprise_planning_owner: ""
+reprise_planning_group: ""
+
+# true  : exécution avec -y (sans demande de confirmation)
+# false : déploiement seul, sans exécution
+reprise_planning_run: true
+
+# Identifiants Oracle : lus dans le vault (vars/vault_gedeon.yml)
+reprise_planning_db_user: "{{ vault_db_user | default('') }}"
+reprise_planning_db_password: "{{ vault_db_password | default('') }}"
+reprise_planning_db_tns: "{{ vault_db_tns | default('') }}"

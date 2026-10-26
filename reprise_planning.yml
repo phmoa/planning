@@ -1,0 +1,18 @@
+---
+# Playbook AAP : reprise des plannings bloqués.
+# Job Template : associer le credential machine + un credential de type "Vault"
+# contenant le mot de passe utilisé pour chiffrer vars/vault_gedeon.yml.
+
+- name: Reprise des plannings bloqués
+  hosts: "{{ target_hosts | default('all') }}"
+  gather_facts: false
+
+  vars_files:
+    - vars/vault_gedeon.yml
+
+  # Décommenter si le script doit tourner sous un compte applicatif
+  # become: true
+  # become_user: appuser
+
+  roles:
+    - reprise_planning

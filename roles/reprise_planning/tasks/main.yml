@@ -1,0 +1,60 @@
+---
+- name: Vérifier que les identifiants Oracle sont fournis
+  ansible.builtin.assert:
+    that:
+      - reprise_planning_db_user | length > 0
+      - reprise_planning_db_password | length > 0
+    fail_msg: "vault_db_user / vault_db_password absents (vars/vault_gedeon.yml)."
+    quiet: true
+  no_log: true
+
+- name: Créer le dossier du script
+  ansible.builtin.file:
+    path: "{{ reprise_planning_script_dir }}"
+    state: directory
+    mode: "0750"
+    owner: "{{ reprise_planning_owner | default(omit, true) }}"
+    group: "{{ reprise_planning_group | default(omit, true) }}"
+
+- name: Déployer le script de reprise
+  ansible.builtin.copy:
+    src: reprise_planning.ksh
+    dest: "{{ reprise_planning_script_dir }}/{{ reprise_planning_script_name }}"
+    mode: "0750"
+    owner: "{{ reprise_planning_owner | default(omit, true) }}"
+    group: "{{ reprise_planning_group | default(omit, true) }}"
+
+- name: Exécution du script
+  when: reprise_planning_run | bool
+  block:
+    - name: Lancer la reprise des plannings
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/bin/ksh', reprise_planning_script_dir ~ '/' ~ reprise_planning_script_name,
+              '-u', reprise_planning_db_user,
+              '-p', reprise_planning_db_password]
+             + (['-d', reprise_planning_db_tns] if reprise_planning_db_tns | length > 0 else [])
+             + ['-y'] }}
+        # Le script utilise ./logs et des fichiers temporaires relatifs
+        chdir: "{{ reprise_planning_script_dir }}"
+      register: reprise_planning_result
+      changed_when: "'[OK]' in reprise_planning_result.stdout"
+      failed_when: reprise_planning_result.rc != 0
+      # Masque la ligne de commande (qui contient le mot de passe) dans la sortie AAP
+      no_log: true
+
+  always:
+    - name: Code retour du script
+      ansible.builtin.debug:
+        msg: "rc = {{ reprise_planning_result.rc | default('n/a') }}"
+      when: reprise_planning_result is defined
+
+    - name: Sortie du script
+      ansible.builtin.debug:
+        var: reprise_planning_result.stdout_lines
+      when: reprise_planning_result.stdout_lines is defined
+
+    - name: Erreurs du script
+      ansible.builtin.debug:
+        var: reprise_planning_result.stderr_lines
+      when: reprise_planning_result.stderr_lines | default([]) | length > 0

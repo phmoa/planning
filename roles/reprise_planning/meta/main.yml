@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: reprise_planning
+  author: melbour
+  description: Déploie et exécute le script de reprise des plannings bloqués
+  min_ansible_version: "2.14"
+  platforms:
+    - name: EL
+      versions:
+        - all
+dependencies: []
