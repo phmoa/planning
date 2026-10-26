@@ -4,7 +4,7 @@
     that:
       - reprise_planning_db_user | length > 0
       - reprise_planning_db_password | length > 0
-    fail_msg: "vault_db_user / vault_db_password absents (vars/vault_gedeon.yml)."
+    fail_msg: "vault_db_user / vault_db_password absents (vars/<env>/vault.yml)."
     quiet: true
   no_log: true
 

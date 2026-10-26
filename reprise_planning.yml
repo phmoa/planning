@@ -1,18 +1,33 @@
 ---
 # Playbook AAP : reprise des plannings bloqués.
-# Job Template : associer le credential machine + un credential de type "Vault"
-# contenant le mot de passe utilisé pour chiffrer vars/vault_gedeon.yml.
+# L'inventaire est fourni par AAP.
+# Les identifiants Oracle sont lus dans vars/<env>/vault.yml (chiffré),
+# <env> étant donné par la variable reprise_planning_env (preprod | prod),
+# à définir dans les Extra Variables de chaque Job Template :
+#   reprise_planning_env: prod
+# Chaque Job Template porte aussi son credential Vault (vault-id preprod ou prod).
 
 - name: Reprise des plannings bloqués
   hosts: "{{ target_hosts | default('all') }}"
   gather_facts: false
 
-  vars_files:
-    - vars/vault_gedeon.yml
-
   # Décommenter si le script doit tourner sous un compte applicatif
   # become: true
   # become_user: appuser
+
+  pre_tasks:
+    - name: Vérifier l'environnement demandé
+      ansible.builtin.assert:
+        that:
+          - reprise_planning_env is defined
+          - reprise_planning_env in ['preprod', 'prod']
+        fail_msg: "Définir reprise_planning_env (preprod ou prod) dans les Extra Variables du Job Template."
+        quiet: true
+
+    - name: Charger les identifiants de l'environnement {{ reprise_planning_env }}
+      ansible.builtin.include_vars:
+        file: "vars/{{ reprise_planning_env }}/vault.yml"
+      no_log: true
 
   roles:
     - reprise_planning

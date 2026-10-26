@@ -1,8 +1,8 @@
 ---
-# Modèle à remplir PUIS chiffrer avant tout commit :
-#   ansible-vault encrypt vars/vault_gedeon.yml
+# Secrets PROD. À remplir PUIS chiffrer avant tout commit :
+#   ansible-vault encrypt --vault-id prod@prompt vars/prod/vault.yml
 # Pour modifier ensuite :
-#   ansible-vault edit vars/vault_gedeon.yml
+#   ansible-vault edit --vault-id prod@prompt vars/prod/vault.yml
 
 vault_db_user: "CHANGE_ME"
 vault_db_password: "CHANGE_ME"
