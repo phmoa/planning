@@ -1,0 +1,9 @@
+---
+# Environnements autorisés
+load_env_allowed: ['preprod', 'prod']
+
+# Dossier racine des variables par environnement (à la racine du projet)
+load_env_vars_root: "{{ playbook_dir }}/../vars"
+
+# Refuser un vault.yml non chiffré (protection contre un commit de secrets en clair)
+load_env_require_encrypted_vault: true

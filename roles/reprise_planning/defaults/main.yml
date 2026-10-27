@@ -4,16 +4,54 @@
 reprise_planning_script_dir: /as_shared/tailored/custom/batchs/reprise_planning
 reprise_planning_script_name: reprise_planning.ksh
 
+# Interpréteur utilisé pour lancer le script
+reprise_planning_shell: /bin/ksh
+
 # Propriétaire / groupe du script (laisser vide pour ne pas les forcer)
 reprise_planning_owner: ""
 reprise_planning_group: ""
 
 # true  : exécution avec -y (sans demande de confirmation)
-# false : déploiement seul, sans exécution
+# false : déploiement et contrôles seuls, sans exécution
 reprise_planning_run: true
 
+# Durée maximale d'exécution du script (secondes). Au-delà, il est arrêté.
+reprise_planning_timeout: 3600
+
+# Durée maximale du test de connexion Oracle (secondes)
+reprise_planning_db_check_timeout: 60
+
+# Tester la connexion Oracle avant de lancer le script
+reprise_planning_db_check: true
+
+# Variables d'environnement Oracle. AAP n'exécute pas le .profile du compte :
+# si sqlplus n'est pas dans le PATH par défaut, les renseigner ici, par exemple :
+#   reprise_planning_oracle_env:
+#     ORACLE_HOME: /u01/app/oracle/product/19.0.0/client_1
+#     PATH: /u01/app/oracle/product/19.0.0/client_1/bin:/usr/bin:/bin
+#     LD_LIBRARY_PATH: /u01/app/oracle/product/19.0.0/client_1/lib
+#     TNS_ADMIN: /u01/app/oracle/product/19.0.0/client_1/network/admin
+reprise_planning_oracle_env: {}
+
+# Répertoires utilisés par le script (codés en dur dans le .ksh), vérifiés avant exécution
+reprise_planning_required_dirs:
+  - path: /as_shared/log/batch
+    writable: false
+  - path: /export/SLE/ITF/EAM/Sortie/GPSEAM001
+    writable: true
+  - path: /as_shared/misc/batchs/gps/planning/encours
+    writable: true
+  - path: /as_shared/misc/batchs/gps/planning/archive
+    writable: true
+
+# Considérer toute sortie d'erreur (stderr) du script comme un échec
+reprise_planning_fail_on_stderr: true
+
+# Nombre de lignes du log du script affichées en cas d'échec
+reprise_planning_log_tail: 50
+
 # Identifiants Oracle : lus dans le vault de l'environnement
-# (vars/<env>/vault.yml, chargé par le playbook)
-reprise_planning_db_user: "{{ vault_db_user | default('') }}"
-reprise_planning_db_password: "{{ vault_db_password | default('') }}"
-reprise_planning_db_tns: "{{ vault_db_tns | default('') }}"
+# (vars/<env>/vault.yml, chargé par le rôle load_env)
+reprise_planning_db_user: "{{ vault_reprise_planning_db_user | default('') }}"
+reprise_planning_db_password: "{{ vault_reprise_planning_db_password | default('') }}"
+reprise_planning_db_tns: "{{ vault_reprise_planning_db_tns | default('') }}"

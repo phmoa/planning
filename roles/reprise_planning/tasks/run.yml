@@ -1,0 +1,160 @@
+---
+#############################################################################
+# Verrou : empêche deux exécutions simultanées (deux jobs AAP en parallèle)
+#############################################################################
+- name: Rechercher un verrou abandonné (plus ancien que le délai maximal)
+  ansible.builtin.command:
+    argv:
+      - find
+      - "{{ reprise_planning__lock_dir }}"
+      - -maxdepth
+      - "0"
+      - -mmin
+      - "+{{ ((reprise_planning_timeout | int) / 60) | round(0, 'ceil') | int + 5 }}"
+  register: reprise_planning__stale_lock
+  changed_when: false
+  failed_when: false
+
+- name: Supprimer le verrou abandonné
+  ansible.builtin.file:
+    path: "{{ reprise_planning__lock_dir }}"
+    state: absent
+  when: reprise_planning__stale_lock.stdout | default('') | length > 0
+
+# mkdir est atomique : il échoue si le verrou existe déjà
+- name: Poser le verrou d'exécution
+  ansible.builtin.command:
+    argv: [mkdir, "{{ reprise_planning__lock_dir }}"]
+  register: reprise_planning__lock
+  changed_when: false
+  failed_when: false
+
+- name: Arrêter si une exécution est déjà en cours
+  ansible.builtin.fail:
+    msg: >-
+      Une autre exécution est en cours (verrou {{ reprise_planning__lock_dir }}).
+      Si aucune exécution n'est en cours, supprimer ce dossier.
+      Détail : {{ reprise_planning__lock.stderr | default('') }}
+  when: reprise_planning__lock.rc != 0
+
+- name: Mémoriser la pose du verrou
+  ansible.builtin.set_fact:
+    reprise_planning__lock_acquired: true
+
+#############################################################################
+# Exécution
+#############################################################################
+- name: Lancer la reprise des plannings
+  ansible.builtin.command:
+    argv: >-
+      {{ ['timeout', '--kill-after=60', reprise_planning_timeout | string,
+          reprise_planning_shell, reprise_planning__script_path,
+          '-u', reprise_planning_db_user,
+          '-p', reprise_planning_db_password]
+         + (['-d', reprise_planning_db_tns] if reprise_planning_db_tns | length > 0 else [])
+         + ['-y'] }}
+    # Le script utilise ./logs et des fichiers temporaires relatifs
+    chdir: "{{ reprise_planning_script_dir }}"
+  environment: "{{ reprise_planning_oracle_env }}"
+  register: reprise_planning__run
+  changed_when: false
+  failed_when: false
+  # Masque la ligne de commande (qui contient le mot de passe)
+  no_log: true
+
+- name: Sortie du script
+  ansible.builtin.debug:
+    var: reprise_planning__run.stdout_lines
+  when: reprise_planning__run.stdout_lines | default([]) | length > 0
+
+- name: Erreurs du script (stderr)
+  ansible.builtin.debug:
+    var: reprise_planning__run.stderr_lines
+  when: reprise_planning__run.stderr_lines | default([]) | length > 0
+
+#############################################################################
+# Lecture du log du script (contient la sortie de la mise à jour SQL finale)
+#############################################################################
+- name: Repérer le fichier de log du script
+  ansible.builtin.set_fact:
+    reprise_planning__log_path: >-
+      {%- set p = (reprise_planning__run.stdout | default('') | regex_search('Fichier de log\s*:\s*(\S+)', '\\1') or [''])[0] -%}
+      {{- '' if p == '' else (p if p.startswith('/') else reprise_planning_script_dir ~ '/' ~ (p | regex_replace('^\./', ''))) -}}
+
+- name: Lire le log du script
+  ansible.builtin.slurp:
+    src: "{{ reprise_planning__log_path }}"
+  register: reprise_planning__log
+  failed_when: false
+  when: reprise_planning__log_path | length > 0
+
+- name: Préparer le contenu du log
+  ansible.builtin.set_fact:
+    reprise_planning__log_text: >-
+      {{ (reprise_planning__log.content | b64decode) if (reprise_planning__log.content is defined) else '' }}
+
+#############################################################################
+# Analyse du résultat : chaque anomalie détectée est ajoutée à reprise_planning__errors
+#############################################################################
+- name: Analyser le résultat
+  ansible.builtin.set_fact:
+    reprise_planning__errors: >-
+      {%- set r = reprise_planning__run -%}
+      {%- set log_path = reprise_planning__log_path -%}
+      {%- set rx = reprise_planning__ora_regex -%}
+      {%- set errs = [] -%}
+      {%- set rc = r.rc | default(none) -%}
+      {%- if rc is none -%}
+        {%- set _ = errs.append("Le script n'a pas pu être lancé : " ~ (r.msg | default('cause inconnue'))) -%}
+      {%- elif rc == 124 or rc == 137 -%}
+        {%- set _ = errs.append('Délai maximal de ' ~ reprise_planning_timeout ~ ' s dépassé : script arrêté (code ' ~ rc ~ '). '
+                                ~ 'Des déplacements de fichiers ont pu être faits sans la mise à jour SQL.') -%}
+      {%- elif rc != 0 -%}
+        {%- set _ = errs.append('Le script a terminé en erreur (code retour ' ~ rc ~ ').') -%}
+      {%- endif -%}
+      {%- set ora_out = (r.stdout_lines | default([]) + r.stderr_lines | default([]))
+                        | select('search', rx) | map('trim') | unique | list -%}
+      {%- if ora_out | length > 0 -%}
+        {%- set _ = errs.append('Erreurs Oracle dans la sortie du script : ' ~ (ora_out | join(' | '))) -%}
+      {%- endif -%}
+      {%- set ora_log = reprise_planning__log_text.splitlines()
+                        | select('search', rx) | map('trim') | unique | reject('in', ora_out) | list -%}
+      {%- if ora_log | length > 0 -%}
+        {%- set _ = errs.append('Erreurs Oracle dans le log ' ~ log_path ~ ' : ' ~ (ora_log | join(' | '))) -%}
+      {%- endif -%}
+      {%- if '[ERREUR]' in (r.stdout | default('')) -%}
+        {%- set _ = errs.append('Le script signale une erreur : '
+                                ~ (r.stdout_lines | default([]) | select('search', '\[ERREUR\]') | map('trim') | join(' | '))) -%}
+      {%- endif -%}
+      {%- if (reprise_planning_fail_on_stderr | bool) and (r.stderr | default('') | trim | length > 0) -%}
+        {%- set _ = errs.append("Sortie d'erreur non vide : " ~ (r.stderr_lines | default([]) | map('trim') | join(' | '))) -%}
+      {%- endif -%}
+      {%- if rc is not none and log_path | length == 0 -%}
+        {%- set _ = errs.append('Fichier de log du script introuvable dans sa sortie (le script a-t-il démarré normalement ?).') -%}
+      {%- elif log_path | length > 0 and reprise_planning__log.content is not defined -%}
+        {%- set _ = errs.append('Log du script illisible : ' ~ log_path ~ ' (' ~ (reprise_planning__log.msg | default('')) ~ ')') -%}
+      {%- endif -%}
+      {{- errs -}}
+
+- name: Fin du log du script
+  ansible.builtin.debug:
+    msg: "{{ reprise_planning__log_text.splitlines()[-(reprise_planning_log_tail | int) :] }}"
+  when:
+    - reprise_planning__errors | length > 0
+    - reprise_planning__log_text | length > 0
+
+- name: Arrêter en cas d'anomalie
+  ansible.builtin.fail:
+    msg: "{{ reprise_planning__errors | join(' ### ') }}"
+  when: reprise_planning__errors | length > 0
+
+- name: Actions effectuées
+  ansible.builtin.debug:
+    msg: "{{ reprise_planning__run.stdout_lines | select('search', '\\[OK\\]') | map('trim') | list }}"
+  changed_when: true
+  when: "'[OK]' in reprise_planning__run.stdout | default('')"
+
+- name: Aucune action nécessaire
+  ansible.builtin.debug:
+    msg: "Rien à reprendre : aucune action effectuée."
+  when: "'[OK]' not in reprise_planning__run.stdout | default('')"

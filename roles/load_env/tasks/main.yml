@@ -1,0 +1,73 @@
+---
+# Chargement des variables d'environnement, commun à tous les playbooks.
+# Utilisation : placer ce rôle en premier dans chaque play :
+#   roles:
+#     - load_env
+#     - <mon_role>
+#
+# env_name (preprod | prod) est défini dans les Extra Variables du Job Template AAP
+# (ou, mieux, dans les variables de l'inventaire AAP).
+# Charge tous les fichiers .yml/.yaml de vars/<env_name>/ à la racine du projet.
+
+- name: Vérifier l'environnement demandé
+  ansible.builtin.assert:
+    that:
+      - env_name is defined
+      - env_name in load_env_allowed
+    fail_msg: >-
+      env_name {{ ('= ' ~ env_name ~ ' est invalide') if env_name is defined else 'est absent' }}.
+      Valeurs possibles : {{ load_env_allowed | join(', ') }}.
+      À définir dans les Extra Variables du Job Template ou dans l'inventaire AAP.
+    quiet: true
+
+- name: Vérifier le dossier des variables de l'environnement (contrôleur) {{ env_name }}
+  ansible.builtin.stat:
+    path: "{{ load_env_vars_root }}/{{ env_name }}"
+  delegate_to: localhost
+  run_once: true
+  register: load_env__dir
+
+- name: Arrêter si le dossier des variables est introuvable {{ env_name }}
+  ansible.builtin.fail:
+    msg: "Dossier introuvable dans le projet : {{ load_env_vars_root }}/{{ env_name }}"
+  when: not (load_env__dir.stat.exists and load_env__dir.stat.isdir)
+
+- name: Vérifier que le vault de l'environnement est chiffré {{ env_name }}
+  when: load_env_require_encrypted_vault | bool
+  block:
+    - name: Lire l'en-tête de vault.yml (contrôleur)
+      ansible.builtin.command:
+        argv: [head, -c, "14", "{{ load_env_vars_root }}/{{ env_name }}/vault.yml"]
+      delegate_to: localhost
+      run_once: true
+      changed_when: false
+      failed_when: false
+      register: load_env__vault_head
+
+    - name: Arrêter si vault.yml est absent ou en clair
+      ansible.builtin.fail:
+        msg: >-
+          {{ load_env_vars_root }}/{{ env_name }}/vault.yml
+          {{ 'est introuvable' if load_env__vault_head.rc != 0 else "n'est PAS chiffré" }}.
+          Le chiffrer : ansible-vault encrypt --vault-id {{ env_name }}@prompt vars/{{ env_name }}/vault.yml
+      when: load_env__vault_head.rc != 0 or load_env__vault_head.stdout != '$ANSIBLE_VAULT'
+
+- name: Charger les variables de l'environnement {{ env_name }}
+  block:
+    - name: Charger les fichiers de vars/ de l'environnement {{ env_name }}
+      ansible.builtin.include_vars:
+        dir: "{{ load_env_vars_root }}/{{ env_name }}"
+        extensions:
+          - yml
+          - yaml
+      # Masque les valeurs déchiffrées dans la sortie AAP
+      no_log: true
+
+  rescue:
+    - name: Arrêter avec la cause probable
+      ansible.builtin.fail:
+        msg: >-
+          Impossible de charger vars/{{ env_name }}/ (détail masqué car il peut contenir des secrets).
+          Causes possibles : credential Vault '{{ env_name }}' absent du Job Template ou mot de passe incorrect,
+          vault.yml chiffré avec un autre vault-id, ou fichier YAML invalide dans vars/{{ env_name }}/.
+          Vérifier localement : ansible-vault view --vault-id {{ env_name }}@prompt vars/{{ env_name }}/vault.yml

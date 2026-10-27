@@ -1,0 +1,6 @@
+---
+# Variables NON sensibles PREPROD propres à reprise_planning
+# (surchargent roles/reprise_planning/defaults/main.yml).
+# reprise_planning_script_dir: /as_shared/tailored/custom/batchs/reprise_planning
+# reprise_planning_owner: ""
+# reprise_planning_group: ""

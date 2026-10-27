@@ -1,0 +1,16 @@
+---
+# Constantes internes du rôle (ne pas surcharger)
+reprise_planning__script_path: "{{ reprise_planning_script_dir }}/{{ reprise_planning_script_name }}"
+reprise_planning__lock_dir: "{{ reprise_planning_script_dir }}/.reprise_planning.lock"
+reprise_planning__connect_string: >-
+  {{ reprise_planning_db_user }}/"{{ reprise_planning_db_password }}"{{ ('@' ~ reprise_planning_db_tns) if reprise_planning_db_tns | length > 0 else '' }}
+# Motif des erreurs Oracle / SQL*Plus (appliqué ligne par ligne)
+reprise_planning__ora_regex: '\b(?:ORA|SP2|TNS)-\d{4,5}'
+# Tables utilisées par le script : lecture vérifiée avant exécution
+reprise_planning__tables_read:
+  - batch_job_execution
+  - batch_job_instance
+  - batch_job_execution_params
+  - itf_gpat_projet_seq
+# Table mise à jour par le script : droit de mise à jour vérifié avant exécution
+reprise_planning__table_update: itf_gpat_projet_seq

@@ -1,0 +1,4 @@
+---
+# Variables NON sensibles PREPROD partagées par tous les playbooks.
+# Préfixer par common_ pour éviter les collisions.
+common_env_label: "PREPROD"

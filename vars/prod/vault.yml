@@ -1,10 +1,12 @@
 ---
-# Secrets PROD. À remplir PUIS chiffrer avant tout commit :
+# Secrets PROD de TOUS les playbooks (préfixer chaque variable par vault_<role>_).
+# À remplir PUIS chiffrer avant tout commit :
 #   ansible-vault encrypt --vault-id prod@prompt vars/prod/vault.yml
 # Pour modifier ensuite :
 #   ansible-vault edit --vault-id prod@prompt vars/prod/vault.yml
 
-vault_db_user: "CHANGE_ME"
-vault_db_password: "CHANGE_ME"
+# --- reprise_planning ---
+vault_reprise_planning_db_user: "CHANGE_ME"
+vault_reprise_planning_db_password: "CHANGE_ME"
 # Alias TNS ou hote:port/service. Laisser vide si ORACLE_SID est positionné sur le serveur.
-vault_db_tns: ""
+vault_reprise_planning_db_tns: ""
