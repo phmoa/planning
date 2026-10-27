@@ -14,6 +14,9 @@
   # become_user: appuser
 
   roles:
-    # Toujours en premier : charge vars/<env_name>/
-    - load_env
+    # Toujours en premier : charge vars/<env_name>/ common.yml, reprise_planning.yml, vault.yml
+    - role: load_env
+      vars:
+        load_env_files:
+          - reprise_planning
     - reprise_planning

@@ -1,65 +1,94 @@
 ---
 # Chargement des variables d'environnement, commun à tous les playbooks.
-# Utilisation : placer ce rôle en premier dans chaque play :
+# Utilisation : placer ce rôle en premier dans chaque play, en listant
+# les fichiers propres au playbook :
 #   roles:
-#     - load_env
-#     - <mon_role>
+#     - role: load_env
+#       vars:
+#         load_env_files: [reprise_planning]
+#     - reprise_planning
+#
+# Fichiers chargés depuis vars/<env_name>/ (et uniquement ceux-là) :
+#   - common.yml   (toujours)
+#   - <fichiers listés dans load_env_files>.yml
+#   - vault.yml    (toujours, chiffré)
 #
 # env_name (preprod | prod) est défini dans les Extra Variables du Job Template AAP
 # (ou, mieux, dans les variables de l'inventaire AAP).
-# Charge tous les fichiers .yml/.yaml de vars/<env_name>/ à la racine du projet.
 
-- name: Vérifier l'environnement demandé
+- name: Vérifier les paramètres de load_env
   ansible.builtin.assert:
     that:
       - env_name is defined
       - env_name in load_env_allowed
+      - load_env_files is sequence
+      - load_env_files is not string
+      - load_env_files | select('search', '[/\\\\]|\\.\\.') | list | length == 0
     fail_msg: >-
-      env_name {{ ('= ' ~ env_name ~ ' est invalide') if env_name is defined else 'est absent' }}.
-      Valeurs possibles : {{ load_env_allowed | join(', ') }}.
-      À définir dans les Extra Variables du Job Template ou dans l'inventaire AAP.
+      {% if env_name is not defined %}env_name est absent.
+      {%- elif env_name not in load_env_allowed %}env_name = {{ env_name }} est invalide.
+      {%- else %}load_env_files doit être une liste de noms de fichiers sans chemin ni extension (ex. [reprise_planning]).
+      {%- endif %}
+      Valeurs possibles pour env_name : {{ load_env_allowed | join(', ') }}.
     quiet: true
 
-- name: Vérifier le dossier des variables de l'environnement (contrôleur) {{ env_name }}
+- name: Vérifier la présence des fichiers à charger (contrôleur)
   ansible.builtin.stat:
-    path: "{{ load_env_vars_root }}/{{ env_name }}"
+    path: "{{ load_env__dir }}/{{ item }}.yml"
+  loop: "{{ load_env__file_list }}"
   delegate_to: localhost
   run_once: true
-  register: load_env__dir
+  register: load_env__stat
 
-- name: Arrêter si le dossier des variables est introuvable {{ env_name }}
+- name: Arrêter si un fichier est absent
   ansible.builtin.fail:
-    msg: "Dossier introuvable dans le projet : {{ load_env_vars_root }}/{{ env_name }}"
-  when: not (load_env__dir.stat.exists and load_env__dir.stat.isdir)
+    msg: >-
+      Fichier(s) introuvable(s) dans vars/{{ env_name }}/ :
+      {{ load_env__stat.results | rejectattr('stat.exists') | map(attribute='item') | map('regex_replace', '$', '.yml') | join(', ') }}
+  when: load_env__stat.results | rejectattr('stat.exists') | list | length > 0
 
-- name: Vérifier que le vault de l'environnement est chiffré {{ env_name }}
+- name: Vérifier que vault.yml est chiffré
   when: load_env_require_encrypted_vault | bool
   block:
     - name: Lire l'en-tête de vault.yml (contrôleur)
       ansible.builtin.command:
-        argv: [head, -c, "14", "{{ load_env_vars_root }}/{{ env_name }}/vault.yml"]
+        argv: [head, -c, "14", "{{ load_env__dir }}/vault.yml"]
       delegate_to: localhost
       run_once: true
       changed_when: false
       failed_when: false
       register: load_env__vault_head
 
-    - name: Arrêter si vault.yml est absent ou en clair
+    - name: Arrêter si vault.yml est en clair
       ansible.builtin.fail:
         msg: >-
-          {{ load_env_vars_root }}/{{ env_name }}/vault.yml
-          {{ 'est introuvable' if load_env__vault_head.rc != 0 else "n'est PAS chiffré" }}.
+          vars/{{ env_name }}/vault.yml n'est PAS chiffré.
           Le chiffrer : ansible-vault encrypt --vault-id {{ env_name }}@prompt vars/{{ env_name }}/vault.yml
-      when: load_env__vault_head.rc != 0 or load_env__vault_head.stdout != '$ANSIBLE_VAULT'
+      when: load_env__vault_head.stdout | default('') != '$ANSIBLE_VAULT'
 
-- name: Charger les variables de l'environnement {{ env_name }}
+# Fichiers non sensibles : pas de no_log, pour que l'erreur YAML soit affichée
+- name: Charger les variables non sensibles
   block:
-    - name: Charger les fichiers de vars/ de l'environnement {{ env_name }}
+    - name: Charger les fichiers non sensibles
       ansible.builtin.include_vars:
-        dir: "{{ load_env_vars_root }}/{{ env_name }}"
-        extensions:
-          - yml
-          - yaml
+        file: "{{ load_env__dir }}/{{ item }}.yml"
+      loop: "{{ load_env__file_list | reject('eq', 'vault') | list }}"
+
+  rescue:
+    - name: Arrêter en indiquant le fichier invalide
+      ansible.builtin.fail:
+        msg: >-
+          {% for r in ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') -%}
+          Fichier invalide : vars/{{ env_name }}/{{ r.item }}.yml : {{ r.message | default(r.msg) | default('erreur inconnue') }}
+          {% else -%}
+          Impossible de charger les variables de vars/{{ env_name }}/ : {{ ansible_failed_result.msg | default('erreur inconnue') }}
+          {%- endfor %}
+
+- name: Charger les secrets
+  block:
+    - name: Charger vault.yml
+      ansible.builtin.include_vars:
+        file: "{{ load_env__dir }}/vault.yml"
       # Masque les valeurs déchiffrées dans la sortie AAP
       no_log: true
 
@@ -67,7 +96,7 @@
     - name: Arrêter avec la cause probable
       ansible.builtin.fail:
         msg: >-
-          Impossible de charger vars/{{ env_name }}/ (détail masqué car il peut contenir des secrets).
+          Impossible de charger vars/{{ env_name }}/vault.yml (détail masqué car il peut contenir des secrets).
           Causes possibles : credential Vault '{{ env_name }}' absent du Job Template ou mot de passe incorrect,
-          vault.yml chiffré avec un autre vault-id, ou fichier YAML invalide dans vars/{{ env_name }}/.
+          fichier chiffré avec un autre vault-id, ou YAML invalide une fois déchiffré.
           Vérifier localement : ansible-vault view --vault-id {{ env_name }}@prompt vars/{{ env_name }}/vault.yml

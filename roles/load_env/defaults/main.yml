@@ -2,6 +2,10 @@
 # Environnements autorisés
 load_env_allowed: ['preprod', 'prod']
 
+# Fichiers propres au playbook à charger depuis vars/<env_name>/, sans extension.
+# Ex. : load_env_files: [reprise_planning]
+load_env_files: []
+
 # Dossier racine des variables par environnement (à la racine du projet)
 load_env_vars_root: "{{ playbook_dir }}/../vars"
 

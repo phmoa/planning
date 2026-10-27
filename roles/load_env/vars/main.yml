@@ -1,0 +1,5 @@
+---
+# Constantes internes du rôle (ne pas surcharger)
+load_env__dir: "{{ load_env_vars_root }}/{{ env_name }}"
+# Ordre de chargement : common, fichiers du playbook, puis vault (le dernier chargé l'emporte)
+load_env__file_list: "{{ (['common'] + load_env_files + ['vault']) | unique }}"
