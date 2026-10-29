@@ -1,17 +1,41 @@
 ---
-# Toute erreur d'une étape est rattrapée ici, résumée, puis le job est mis en échec.
-# Le verrou d'exécution est toujours libéré.
+# Reprise des plannings bloqués (version Ansible du script reprise_planning.ksh).
+#   1. Contrôles préalables (paramètres, outils, répertoires, connexion et droits Oracle)
+#   2. Verrou (uniquement si des modifications peuvent avoir lieu)
+#   3. Plan, en lecture seule : exécutions, projets, répertoires, conflits
+#   4. Application du plan : déplacements puis mise à jour SQL en une transaction
+# reprise_planning_run: false ou le mode check s'arrêtent après le plan.
 - name: Reprise des plannings
   block:
     - name: Contrôles préalables
       ansible.builtin.import_tasks: preflight.yml
 
-    - name: Déploiement du script
-      ansible.builtin.import_tasks: deploy.yml
+    - name: Verrou d'exécution
+      ansible.builtin.import_tasks: lock.yml
+      when: reprise_planning__apply | bool
 
-    - name: Exécution du script
-      ansible.builtin.import_tasks: run.yml
-      when: reprise_planning_run | bool
+    - name: Calcul du plan
+      ansible.builtin.import_tasks: plan.yml
+
+    - name: Application du plan
+      ansible.builtin.import_tasks: apply.yml
+      when:
+        - reprise_planning__apply | bool
+        - reprise_planning__has_actions | bool
+
+    - name: Rien à reprendre
+      ansible.builtin.debug:
+        msg: "Rien à reprendre : aucune action nécessaire."
+      when: not (reprise_planning__has_actions | bool)
+
+    - name: Mode plan uniquement
+      ansible.builtin.debug:
+        msg: >-
+          Plan affiché ci-dessus, AUCUNE modification effectuée
+          ({{ 'mode check' if ansible_check_mode else 'reprise_planning_run: false' }}).
+      when:
+        - not (reprise_planning__apply | bool)
+        - reprise_planning__has_actions | bool
 
   rescue:
     - name: Échec de la reprise
@@ -19,11 +43,17 @@
         msg: >-
           Échec à l'étape « {{ ansible_failed_task.name | default('inconnue') }} » sur {{ inventory_hostname }} :
           {{ ansible_failed_result.msg | default('voir la tâche en erreur ci-dessus') }}
+          {%- set a = reprise_planning__done_archive.results | default([]) | selectattr('changed') | list | length -%}
+          {%- set m = reprise_planning__done_moves.results | default([]) | selectattr('changed') | list | length -%}
+          {%- if a + m > 0 %}
+          ### Déjà effectué avant l'échec : {{ a }} archivage(s), {{ m }} élément(s) remis en entrée.
+          Relancer le job : les actions faites ne seront pas refaites et la base sera mise à jour.
+          {%- endif %}
 
   always:
     - name: Libérer le verrou d'exécution
       ansible.builtin.file:
-        path: "{{ reprise_planning__lock_dir }}"
+        path: "{{ reprise_planning_lock_path }}"
         state: absent
       changed_when: false
       when: reprise_planning__lock_acquired | default(false) | bool

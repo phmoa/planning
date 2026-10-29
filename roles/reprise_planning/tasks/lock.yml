@@ -1,0 +1,42 @@
+---
+# Verrou : empêche deux exécutions simultanées (deux jobs AAP en parallèle).
+# Libéré dans le bloc « always » de main.yml, même en cas d'échec.
+
+- name: Rechercher un verrou abandonné
+  ansible.builtin.command:
+    argv:
+      - find
+      - "{{ reprise_planning_lock_path }}"
+      - -maxdepth
+      - "0"
+      - -mmin
+      - "+{{ reprise_planning_lock_max_age_minutes | int }}"
+  register: reprise_planning__stale_lock
+  changed_when: false
+  failed_when: false
+
+- name: Supprimer le verrou abandonné
+  ansible.builtin.file:
+    path: "{{ reprise_planning_lock_path }}"
+    state: absent
+  when: reprise_planning__stale_lock.stdout | default('') | length > 0
+
+# mkdir est atomique : il échoue si le verrou existe déjà
+- name: Poser le verrou d'exécution
+  ansible.builtin.command:
+    argv: [mkdir, "{{ reprise_planning_lock_path }}"]
+  register: reprise_planning__lock
+  changed_when: false
+  failed_when: false
+
+- name: Arrêter si une exécution est déjà en cours
+  ansible.builtin.fail:
+    msg: >-
+      Une autre exécution est en cours (verrou {{ reprise_planning_lock_path }}).
+      Si aucune exécution n'est en cours, supprimer ce dossier.
+      Détail : {{ reprise_planning__lock.stderr | default('') }}
+  when: reprise_planning__lock.rc != 0
+
+- name: Mémoriser la pose du verrou
+  ansible.builtin.set_fact:
+    reprise_planning__lock_acquired: true

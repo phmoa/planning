@@ -3,13 +3,13 @@
 # L'inventaire est fourni par AAP.
 # Job Template AAP (un par environnement) :
 #   - Extra Variables : env_name: preprod   (ou prod)
-#   - Credentials     : machine + Vault (vault-id preprod ou prod)
+#   - Credentials     : machine + Vault (mot de passe vault de l'environnement, sans Vault Identifier)
 
 - name: Reprise des plannings bloqués
   hosts: "{{ target_hosts | default('all') }}"
   gather_facts: false
 
-  # Décommenter si le script doit tourner sous un compte applicatif
+  # Décommenter si les actions doivent être faites sous un compte applicatif
   # become: true
   # become_user: appuser
 

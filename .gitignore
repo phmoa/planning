@@ -1,2 +1,4 @@
 .DS_Store
 *.retry
+# Inventaire de test local : contient des mots de passe en clair
+inventories/test.ini

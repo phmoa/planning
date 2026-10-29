@@ -1,0 +1,59 @@
+---
+# Exécute une requête de LECTURE via sqlplus et renvoie ses lignes dans reprise_planning__sql_rows.
+# Paramètres :
+#   reprise_planning__sql_label : libellé affiché
+#   reprise_planning__sql_text  : requête(s) ; chaque ligne utile doit commencer par 'ROW|'
+# Échoue si : code retour non nul, délai dépassé, erreur ORA-/SP2-/TNS-, ou marqueur de fin absent.
+# Lecture seule : exécuté aussi en mode check.
+
+- name: "SQL : {{ reprise_planning__sql_label }}"
+  ansible.builtin.command:
+    argv:
+      - timeout
+      - "{{ reprise_planning_sql_timeout | string }}"
+      - sqlplus
+      - -S
+      - -L
+      - /nolog
+    stdin: |
+      {{ reprise_planning__sql_header }}
+      {{ reprise_planning__sql_text }}
+      SELECT 'END|OK' FROM dual;
+      EXIT
+  environment: "{{ reprise_planning_oracle_env }}"
+  register: reprise_planning__sql
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  # Masque le texte envoyé (il contient le mot de passe)
+  no_log: true
+
+- name: "Contrôler le résultat SQL : {{ reprise_planning__sql_label }}"
+  vars:
+    reprise_planning__sql_errors: >-
+      {{ (reprise_planning__sql.stdout_lines | default([]) + reprise_planning__sql.stderr_lines | default([]))
+         | select('search', reprise_planning__ora_regex) | map('trim') | unique | list }}
+  ansible.builtin.fail:
+    msg: >-
+      Requête « {{ reprise_planning__sql_label }} » en échec :
+      {% if reprise_planning__sql.rc | default(-1) == 124 -%}
+      délai de {{ reprise_planning_sql_timeout }} s dépassé.
+      {%- elif reprise_planning__sql_errors | length > 0 -%}
+      {{ reprise_planning__sql_errors | join(' | ') }}
+      {%- else -%}
+      code retour {{ reprise_planning__sql.rc | default('n/a') }}, fin de requête non atteinte.
+      {{ reprise_planning__sql.msg | default('') }}
+      {%- endif %}
+  when: >-
+    reprise_planning__sql.rc | default(-1) != 0
+    or reprise_planning__sql_errors | length > 0
+    or 'END|OK' not in (reprise_planning__sql.stdout_lines | default([]) | map('trim') | list)
+
+- name: "Extraire les lignes : {{ reprise_planning__sql_label }}"
+  ansible.builtin.set_fact:
+    reprise_planning__sql_rows: >-
+      {{ reprise_planning__sql.stdout_lines
+         | map('trim')
+         | select('match', '^ROW\|')
+         | map('regex_replace', '^ROW\|', '')
+         | list }}

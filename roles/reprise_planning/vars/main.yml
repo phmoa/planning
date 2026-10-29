@@ -1,16 +1,72 @@
 ---
 # Constantes internes du rôle (ne pas surcharger)
-reprise_planning__script_path: "{{ reprise_planning_script_dir }}/{{ reprise_planning_script_name }}"
-reprise_planning__lock_dir: "{{ reprise_planning_script_dir }}/.reprise_planning.lock"
+
+# Plan seul : variable reprise_planning_run à false, ou mode check d'Ansible
+reprise_planning__apply: "{{ (reprise_planning_run | bool) and not ansible_check_mode }}"
+
 reprise_planning__connect_string: >-
-  {{ reprise_planning_db_user }}/"{{ reprise_planning_db_password }}"{{ ('@' ~ reprise_planning_db_tns) if reprise_planning_db_tns | length > 0 else '' }}
+  {{ reprise_planning_db_user }}/"{{ reprise_planning_db_password }}"{{
+  ('@' ~ reprise_planning_db_tns) if reprise_planning_db_tns | length > 0 else '' }}{{
+  (' AS ' ~ reprise_planning_db_privilege | upper) if reprise_planning_db_privilege | length > 0 else '' }}
+
+reprise_planning__schema_sql: >-
+  {{ ('ALTER SESSION SET CURRENT_SCHEMA = ' ~ reprise_planning_db_schema | upper ~ ';')
+     if reprise_planning_db_schema | length > 0 else '' }}
+
+# En-tête commun à toutes les sessions sqlplus.
+# Toute erreur SQL ou système arrête sqlplus avec un code retour non nul (et annule la transaction).
+# Le mot de passe passe par stdin (CONNECT), jamais par la ligne de commande.
+reprise_planning__sql_header: |
+  WHENEVER SQLERROR EXIT FAILURE ROLLBACK
+  WHENEVER OSERROR EXIT FAILURE ROLLBACK
+  SET PAGESIZE 0
+  SET FEEDBACK OFF
+  SET HEADING OFF
+  SET VERIFY OFF
+  SET ECHO OFF
+  SET DEFINE OFF
+  SET TAB OFF
+  SET TRIMOUT ON
+  SET LINESIZE 32767
+  SET SQLBLANKLINES ON
+  CONNECT {{ reprise_planning__connect_string }}
+  {{ reprise_planning__schema_sql }}
+
+# Jointure commune aux requêtes de recherche (identique au script d'origine)
+reprise_planning__sql_from_where: |
+  FROM batch_job_execution bje
+  JOIN batch_job_instance         bji  ON bje.job_instance_id  = bji.job_instance_id
+  JOIN batch_job_execution_params bjep ON bje.job_execution_id = bjep.job_execution_id
+  JOIN itf_gpat_projet_seq        gpat ON gpat.CODE_PROJET     = bjep.STRING_VAL
+  WHERE bjep.key_name = 'codeProjet'
+    AND bje.STATUS <> 'COMPLETED'
+    AND gpat.STATUT <> 'FINI'
+    AND bje.START_TIME < SYSDATE - INTERVAL '{{ reprise_planning_min_age_hours | int }}' HOUR
+
 # Motif des erreurs Oracle / SQL*Plus (appliqué ligne par ligne)
 reprise_planning__ora_regex: '\b(?:ORA|SP2|TNS)-\d{4,5}'
-# Tables utilisées par le script : lecture vérifiée avant exécution
+
+# Valeurs lues en base, contrôlées avant d'être réutilisées (SQL généré, motifs de recherche)
+reprise_planning__id_regex: '^[0-9]+$'
+reprise_planning__code_regex: '^[A-Za-z0-9_.-]+$'
+reprise_planning__seq_regex: '^-?[0-9]+$'
+reprise_planning__element_regex: '^[^*?\[\]/\\|]+$'
+
+# Tables utilisées : droits vérifiés avant exécution
 reprise_planning__tables_read:
   - batch_job_execution
   - batch_job_instance
   - batch_job_execution_params
   - itf_gpat_projet_seq
-# Table mise à jour par le script : droit de mise à jour vérifié avant exécution
 reprise_planning__table_update: itf_gpat_projet_seq
+
+# Répertoires utilisés, vérifiés avant exécution
+reprise_planning__required_dirs:
+  - path: "{{ reprise_planning_log_dir }}"
+    writable: false
+  - path: "{{ reprise_planning_input_dir }}"
+    writable: true
+  - path: "{{ reprise_planning_encours_dir }}"
+    writable: true
+  - path: "{{ reprise_planning_archive_dir }}"
+    writable: true

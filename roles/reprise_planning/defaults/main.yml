@@ -1,54 +1,50 @@
 ---
-# Dossier de déploiement du script sur le serveur cible.
-# Le script crée ./logs et ses fichiers temporaires dans ce dossier.
-reprise_planning_script_dir: /as_shared/tailored/custom/batchs/reprise_planning
-reprise_planning_script_name: reprise_planning.ksh
-
-# Interpréteur utilisé pour lancer le script
-reprise_planning_shell: /bin/ksh
-
-# Propriétaire / groupe du script (laisser vide pour ne pas les forcer)
-reprise_planning_owner: ""
-reprise_planning_group: ""
-
-# true  : exécution avec -y (sans demande de confirmation)
-# false : déploiement et contrôles seuls, sans exécution
+# true  : calcule le plan puis applique les actions (déplacements + mise à jour SQL)
+# false : calcule et affiche le plan uniquement, sans rien modifier
+# Le mode check d'Ansible (--check / type de job « Check » dans AAP) affiche aussi le plan sans rien modifier.
 reprise_planning_run: true
 
-# Durée maximale d'exécution du script (secondes). Au-delà, il est arrêté.
-reprise_planning_timeout: 3600
+# Répertoires sur le serveur cible
+reprise_planning_log_dir: /as_shared/log/batch
+reprise_planning_input_dir: /export/SLE/ITF/EAM/Sortie/GPSEAM001
+reprise_planning_encours_dir: /as_shared/misc/batchs/gps/planning/encours
+reprise_planning_archive_dir: /as_shared/misc/batchs/gps/planning/archive
 
-# Durée maximale du test de connexion Oracle (secondes)
+# Une exécution est candidate si elle a démarré il y a plus de N heures
+reprise_planning_min_age_hours: 3
+
+# ... et si son log n'a pas été modifié depuis plus de N minutes
+reprise_planning_inactivity_minutes: 10
+
+# Position du 1er caractère utile de l'exchangeId (SUBSTR(exchangeId, N))
+reprise_planning_exchange_id_offset: 5
+
+# Durée maximale d'une requête SQL (secondes)
+reprise_planning_sql_timeout: 300
+
+# Test de connexion et des droits sur les tables avant de commencer
+reprise_planning_db_check: true
 reprise_planning_db_check_timeout: 60
 
-# Tester la connexion Oracle avant de lancer le script
-reprise_planning_db_check: true
+# Verrou empêchant deux exécutions simultanées sur le serveur.
+# Un verrou plus ancien que la durée indiquée est considéré comme abandonné.
+reprise_planning_lock_path: /var/tmp/reprise_planning.lock
+reprise_planning_lock_max_age_minutes: 120
 
 # Variables d'environnement Oracle. AAP n'exécute pas le .profile du compte :
 # si sqlplus n'est pas dans le PATH par défaut, les renseigner ici, par exemple :
 #   reprise_planning_oracle_env:
 #     ORACLE_HOME: /u01/app/oracle/product/19.0.0/client_1
 #     PATH: /u01/app/oracle/product/19.0.0/client_1/bin:/usr/bin:/bin
-#     LD_LIBRARY_PATH: /u01/app/oracle/product/19.0.0/client_1/lib
-#     TNS_ADMIN: /u01/app/oracle/product/19.0.0/client_1/network/admin
 reprise_planning_oracle_env: {}
 
-# Répertoires utilisés par le script (codés en dur dans le .ksh), vérifiés avant exécution
-reprise_planning_required_dirs:
-  - path: /as_shared/log/batch
-    writable: false
-  - path: /export/SLE/ITF/EAM/Sortie/GPSEAM001
-    writable: true
-  - path: /as_shared/misc/batchs/gps/planning/encours
-    writable: true
-  - path: /as_shared/misc/batchs/gps/planning/archive
-    writable: true
+# Privilège de connexion Oracle (SYSDBA par défaut, comme le script d'origine).
+# Mettre "" pour une connexion normale avec le compte applicatif.
+reprise_planning_db_privilege: SYSDBA
 
-# Considérer toute sortie d'erreur (stderr) du script comme un échec
-reprise_planning_fail_on_stderr: true
-
-# Nombre de lignes du log du script affichées en cas d'échec
-reprise_planning_log_tail: 50
+# Schéma propriétaire des tables, si l'utilisateur de connexion n'en est pas le
+# propriétaire (nécessaire avec SYS, sinon ORA-00942). Vide = schéma de l'utilisateur.
+reprise_planning_db_schema: ""
 
 # Identifiants Oracle : lus dans le vault de l'environnement
 # (vars/<env>/vault.yml, chargé par le rôle load_env)

@@ -1,6 +1,14 @@
 ---
 # Variables NON sensibles PREPROD propres à reprise_planning
-# (surchargent roles/reprise_planning/defaults/main.yml).
-# reprise_planning_script_dir: /as_shared/tailored/custom/batchs/reprise_planning
-# reprise_planning_owner: ""
-# reprise_planning_group: ""
+# (surchargent roles/reprise_planning/defaults/main.yml, voir ce fichier pour la liste complète).
+
+# Schéma propriétaire des tables (nécessaire avec SYS AS SYSDBA, sinon ORA-00942)
+# reprise_planning_db_schema: CHANGE_ME_schema_applicatif
+
+# Environnement Oracle si sqlplus n'est pas dans le PATH par défaut
+# reprise_planning_oracle_env:
+#   ORACLE_HOME: /u01/app/oracle/product/19.0.0/client_1
+#   PATH: /u01/app/oracle/product/19.0.0/client_1/bin:/usr/bin:/bin
+
+# Plan uniquement, sans aucune modification
+# reprise_planning_run: false

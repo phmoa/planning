@@ -1,0 +1,154 @@
+---
+# Application du plan. Le plan a déjà été validé (aucun conflit).
+# Chaque action est idempotente : relancée, elle ne refait rien de ce qui est déjà fait.
+# Ordre identique au script : fichiers d'abord, puis base. Si la base échoue, une
+# nouvelle exécution retrouve les projets encore EN-COURS et termine la mise à jour.
+
+#############################################################################
+# Fichiers
+#############################################################################
+- name: Archiver les répertoires en cours
+  ansible.builtin.command:
+    argv: [mv, --, "{{ item.src }}", "{{ item.dest }}"]
+    removes: "{{ item.src }}"
+    creates: "{{ item.dest }}"
+  loop: "{{ reprise_planning__plan.archive }}"
+  loop_control:
+    label: "{{ item.src }} -> {{ item.dest }}"
+  register: reprise_planning__done_archive
+
+- name: Remettre en entrée le contenu des répertoires à rejouer
+  ansible.builtin.command:
+    argv: [mv, --, "{{ item.src }}", "{{ item.dest }}"]
+    removes: "{{ item.src }}"
+    creates: "{{ item.dest }}"
+  loop: "{{ reprise_planning__plan.moves }}"
+  loop_control:
+    label: "{{ item.src }} -> {{ item.dest }}"
+  register: reprise_planning__done_moves
+
+# rmdir échoue si le répertoire n'est pas vide (fichier arrivé entre-temps) : l'erreur est remontée
+- name: Supprimer les répertoires rejoués (vides)
+  ansible.builtin.command:
+    argv: [rmdir, --, "{{ item }}"]
+    removes: "{{ item }}"
+  loop: "{{ reprise_planning__plan.rejeu_dirs }}"
+  register: reprise_planning__done_rmdir
+
+#############################################################################
+# Base : une seule transaction, tout ou rien
+#############################################################################
+- name: Mettre à jour les projets en base
+  when: reprise_planning__plan.updates | length > 0
+  block:
+    # Chaque mise à jour vérifie que le projet est toujours EN-COURS avec la séquence lue
+    # lors du plan. Si une seule ne trouve pas sa ligne, tout est annulé (ROLLBACK).
+    - name: Appliquer les mises à jour SQL (transaction unique)
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "{{ reprise_planning_sql_timeout | string }}"
+          - sqlplus
+          - -S
+          - -L
+          - /nolog
+        stdin: |
+          {{ reprise_planning__sql_header }}
+          SET SERVEROUTPUT ON SIZE UNLIMITED
+          DECLARE
+            PROCEDURE upd(p_code IN VARCHAR2, p_old IN VARCHAR2, p_new IN VARCHAR2) IS
+              n PLS_INTEGER;
+            BEGIN
+              UPDATE itf_gpat_projet_seq
+                 SET STATUT = 'FINI', SEQUENCE_PROJET = p_new
+               WHERE CODE_PROJET = p_code
+                 AND STATUT = 'EN-COURS'
+                 AND TRIM(SEQUENCE_PROJET) = p_old;
+              n := SQL%ROWCOUNT;
+              IF n = 0 THEN
+                RAISE_APPLICATION_ERROR(-20001, 'Projet ' || p_code
+                  || ' : aucune ligne EN-COURS avec la sequence ' || p_old || ' (modifie depuis le plan)');
+              END IF;
+              DBMS_OUTPUT.PUT_LINE('UPD|' || p_code || '|' || n);
+            END upd;
+          BEGIN
+          {% for u in reprise_planning__plan.updates %}
+            upd('{{ u.code }}', '{{ u.old }}', '{{ u.new }}');
+          {% endfor %}
+          END;
+          /
+          COMMIT;
+          SELECT 'END|COMMIT_OK' FROM dual;
+          EXIT
+      environment: "{{ reprise_planning_oracle_env }}"
+      register: reprise_planning__done_sql
+      changed_when: "'END|COMMIT_OK' in (reprise_planning__done_sql.stdout_lines | default([]) | map('trim') | list)"
+      failed_when: false
+      # Masque le texte envoyé (il contient le mot de passe)
+      no_log: true
+
+    - name: Contrôler la mise à jour SQL
+      vars:
+        reprise_planning__sql_errors: >-
+          {{ (reprise_planning__done_sql.stdout_lines | default([]) + reprise_planning__done_sql.stderr_lines | default([]))
+             | select('search', reprise_planning__ora_regex) | map('trim') | unique | list }}
+      ansible.builtin.fail:
+        msg: >-
+          Mise à jour SQL en échec :
+          {% if reprise_planning__done_sql.rc | default(-1) == 124 -%}
+          délai de {{ reprise_planning_sql_timeout }} s dépassé ; la transaction est annulée par Oracle
+          sauf si le COMMIT avait déjà eu lieu : relancer le job, il reprendra les projets encore EN-COURS.
+          {%- elif reprise_planning__sql_errors | length > 0 -%}
+          {{ reprise_planning__sql_errors | join(' | ') }}. Transaction annulée (ROLLBACK), aucune ligne modifiée.
+          {%- else -%}
+          code retour {{ reprise_planning__done_sql.rc | default('n/a') }}, COMMIT non confirmé.
+          {{ reprise_planning__done_sql.msg | default('') }}
+          {%- endif %}
+      when: not (reprise_planning__done_sql.changed | default(false))
+            or reprise_planning__done_sql.rc | default(-1) != 0
+            or reprise_planning__sql_errors | length > 0
+
+    # Relecture après COMMIT : chaque projet doit être FINI avec sa nouvelle séquence
+    - name: Relire les projets mis à jour
+      ansible.builtin.include_tasks: sql_query.yml
+      vars:
+        reprise_planning__sql_label: vérification des projets mis à jour
+        reprise_planning__sql_text: |
+          SELECT 'ROW|' || TRIM(CODE_PROJET) || '|' || TRIM(SEQUENCE_PROJET) || '|' || TRIM(STATUT)
+          FROM itf_gpat_projet_seq
+          WHERE CODE_PROJET IN ({{ reprise_planning__plan.updates | map(attribute='code') | map('regex_replace', '^|$', "'") | join(',') }});
+
+    - name: Contrôler l'état des projets en base
+      vars:
+        reprise_planning__ko: >-
+          {%- set ko = [] -%}
+          {%- for u in reprise_planning__plan.updates -%}
+            {%- if (u.code ~ '|' ~ u.new ~ '|FINI') not in reprise_planning__sql_rows -%}
+              {%- set _ = ko.append(u.code ~ ' (attendu : séquence ' ~ u.new ~ ', FINI)') -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ko }}
+      ansible.builtin.fail:
+        msg: "Après COMMIT, projet(s) dans un état inattendu : {{ reprise_planning__ko | join(', ') }}"
+      when: reprise_planning__ko | length > 0
+
+#############################################################################
+# Compte rendu
+#############################################################################
+- name: Compte rendu des actions effectuées
+  ansible.builtin.debug:
+    msg: >-
+      {%- set out = [] -%}
+      {%- for r in reprise_planning__done_archive.results | default([]) | selectattr('changed') -%}
+        {%- set _ = out.append('[OK] Archivage : ' ~ r.item.src | basename) -%}
+      {%- endfor -%}
+      {%- for d in reprise_planning__plan.rejeu_dirs -%}
+        {%- set n = reprise_planning__done_moves.results | default([]) | selectattr('changed')
+                    | selectattr('item.src', 'match', '^' ~ (d | regex_escape) ~ '/') | list | length -%}
+        {%- set _ = out.append('[OK] Rejeu : ' ~ d | basename ~ ' (' ~ n ~ ' élément(s) remis en entrée)') -%}
+      {%- endfor -%}
+      {%- for l in reprise_planning__done_sql.stdout_lines | default([]) | map('trim') | select('match', '^UPD\|') -%}
+        {%- set f = l.split('|') -%}
+        {%- set _ = out.append('[OK] Projet ' ~ f[1] ~ ' : FINI (' ~ f[2] ~ ' ligne(s))') -%}
+      {%- endfor -%}
+      {{ out if out | length > 0 else ['Rien à faire : tout était déjà appliqué.'] }}

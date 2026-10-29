@@ -37,6 +37,7 @@
     path: "{{ load_env__dir }}/{{ item }}.yml"
   loop: "{{ load_env__file_list }}"
   delegate_to: localhost
+  become: false
   run_once: true
   register: load_env__stat
 
@@ -54,16 +55,19 @@
       ansible.builtin.command:
         argv: [head, -c, "14", "{{ load_env__dir }}/vault.yml"]
       delegate_to: localhost
+      become: false
       run_once: true
       changed_when: false
       failed_when: false
+      # Lecture seule : doit aussi s'exécuter en mode check
+      check_mode: false
       register: load_env__vault_head
 
     - name: Arrêter si vault.yml est en clair
       ansible.builtin.fail:
         msg: >-
           vars/{{ env_name }}/vault.yml n'est PAS chiffré.
-          Le chiffrer : ansible-vault encrypt --vault-id {{ env_name }}@prompt vars/{{ env_name }}/vault.yml
+          Le chiffrer : ansible-vault encrypt --ask-vault-pass vars/{{ env_name }}/vault.yml
       when: load_env__vault_head.stdout | default('') != '$ANSIBLE_VAULT'
 
 # Fichiers non sensibles : pas de no_log, pour que l'erreur YAML soit affichée
@@ -97,6 +101,6 @@
       ansible.builtin.fail:
         msg: >-
           Impossible de charger vars/{{ env_name }}/vault.yml (détail masqué car il peut contenir des secrets).
-          Causes possibles : credential Vault '{{ env_name }}' absent du Job Template ou mot de passe incorrect,
-          fichier chiffré avec un autre vault-id, ou YAML invalide une fois déchiffré.
-          Vérifier localement : ansible-vault view --vault-id {{ env_name }}@prompt vars/{{ env_name }}/vault.yml
+          Causes possibles : credential Vault absent du Job Template ou mot de passe incorrect,
+          fichier chiffré avec le mot de passe d'un autre environnement, ou YAML invalide une fois déchiffré.
+          Vérifier localement : ansible-vault view --ask-vault-pass vars/{{ env_name }}/vault.yml

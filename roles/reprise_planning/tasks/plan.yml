@@ -1,0 +1,320 @@
+---
+# Calcul du plan de reprise. LECTURE SEULE : rien n'est modifié ici.
+# Reproduit les étapes du script d'origine, avec contrôle de chaque valeur lue en base.
+
+#############################################################################
+# Exécutions bloquées
+#############################################################################
+- name: Rechercher les exécutions bloquées
+  ansible.builtin.include_tasks: sql_query.yml
+  vars:
+    reprise_planning__sql_label: exécutions bloquées
+    reprise_planning__sql_text: |
+      SELECT 'ROW|' || TRIM(bje.job_execution_id) || '|' || TRIM(bjep.STRING_VAL)
+      {{ reprise_planning__sql_from_where | trim }}
+      ORDER BY bje.START_TIME DESC, bje.job_execution_id DESC;
+
+# Conserve l'exécution la plus récente de chaque projet (la requête est triée de la plus récente à la plus ancienne)
+- name: Analyser les exécutions et retirer les doublons
+  ansible.builtin.set_fact:
+    reprise_planning__exec: >-
+      {%- set ns = namespace(seen=[], keep=[], dropped=[], bad=[]) -%}
+      {%- for r in reprise_planning__sql_rows -%}
+        {%- set f = r.split('|') -%}
+        {%- if f | length != 2 or f[0] is not match(reprise_planning__id_regex) or f[1] is not match(reprise_planning__code_regex) -%}
+          {%- set ns.bad = ns.bad + [r] -%}
+        {%- elif f[1] in ns.seen -%}
+          {%- set ns.dropped = ns.dropped + [{'id': f[0], 'project': f[1]}] -%}
+        {%- else -%}
+          {%- set ns.seen = ns.seen + [f[1]] -%}
+          {%- set ns.keep = ns.keep + [{'id': f[0], 'project': f[1]}] -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ {'keep': ns.keep, 'dropped': ns.dropped, 'bad': ns.bad} }}
+
+- name: Arrêter si la base renvoie des lignes inattendues
+  ansible.builtin.fail:
+    msg: "Exécutions bloquées : ligne(s) au format inattendu : {{ reprise_planning__exec.bad | join(' | ') }}"
+  when: reprise_planning__exec.bad | length > 0
+
+#############################################################################
+# Filtre : log présent et inactif depuis plus de N minutes
+#############################################################################
+- name: Rechercher les logs inactifs des exécutions
+  ansible.builtin.find:
+    paths: "{{ reprise_planning_log_dir }}"
+    patterns: "{{ reprise_planning__exec.keep | map(attribute='id') | map('regex_replace', '^|$', '*') | list }}"
+    age: "{{ reprise_planning_inactivity_minutes | int }}m"
+    file_type: file
+    recurse: true
+    hidden: true
+  register: reprise_planning__logs
+  when: reprise_planning__exec.keep | length > 0
+
+- name: Retenir les exécutions dont un log est inactif
+  ansible.builtin.set_fact:
+    reprise_planning__ids: >-
+      {%- set names = reprise_planning__logs.files | default([]) | map(attribute='path') | map('basename') | list -%}
+      {%- set ns = namespace(keep=[], nolog=[]) -%}
+      {%- for e in reprise_planning__exec.keep -%}
+        {%- if names | select('search', e.id) | list | length > 0 -%}
+          {%- set ns.keep = ns.keep + [e] -%}
+        {%- else -%}
+          {%- set ns.nolog = ns.nolog + [e] -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ {'keep': ns.keep, 'nolog': ns.nolog} }}
+
+- name: Arrêter si trop d'exécutions (limite Oracle de 1000 valeurs dans IN)
+  ansible.builtin.fail:
+    msg: "{{ reprise_planning__ids.keep | length }} exécutions retenues : au-delà de 1000, traiter par lots."
+  when: reprise_planning__ids.keep | length > 1000
+
+- name: Préparer la liste des identifiants
+  ansible.builtin.set_fact:
+    reprise_planning__in_list: "{{ reprise_planning__ids.keep | map(attribute='id') | join(',') }}"
+
+#############################################################################
+# Projets et séquences à redresser
+#############################################################################
+- name: Projets et séquences à redresser
+  when: reprise_planning__ids.keep | length > 0
+  block:
+    - name: Rechercher les projets et séquences
+      ansible.builtin.include_tasks: sql_query.yml
+      vars:
+        reprise_planning__sql_label: projets et séquences
+        reprise_planning__sql_text: |
+          SELECT DISTINCT 'ROW|' || TRIM(gpat.CODE_PROJET)
+                 || '|' || TRIM(gpat.SEQUENCE_PROJET)
+                 || '|' || TRIM(TO_CHAR(CAST(gpat.SEQUENCE_PROJET AS INTEGER) - 1))
+                 || '|' || TRIM(gpat.STATUT)
+          {{ reprise_planning__sql_from_where | trim }}
+            AND bje.job_execution_id IN ({{ reprise_planning__in_list }});
+
+    - name: Analyser les projets
+      ansible.builtin.set_fact:
+        reprise_planning__projects: >-
+          {%- set ns = namespace(updates=[], skipped=[], bad=[]) -%}
+          {%- for r in reprise_planning__sql_rows -%}
+            {%- set f = r.split('|') -%}
+            {%- if f | length != 4 or f[0] is not match(reprise_planning__code_regex)
+                   or f[1] is not match(reprise_planning__seq_regex) or f[2] is not match(reprise_planning__seq_regex)
+                   or f[3] | length == 0 -%}
+              {%- set ns.bad = ns.bad + [r] -%}
+            {%- elif f[3] == 'EN-COURS' -%}
+              {%- set ns.updates = ns.updates + [{'code': f[0], 'old': f[1], 'new': f[2]}] -%}
+            {%- else -%}
+              {%- set ns.skipped = ns.skipped + [{'code': f[0], 'seq': f[1], 'statut': f[3]}] -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ {'updates': ns.updates, 'skipped': ns.skipped, 'bad': ns.bad} }}
+
+    - name: Arrêter si la base renvoie des lignes inattendues
+      ansible.builtin.fail:
+        msg: "Projets et séquences : ligne(s) au format inattendu : {{ reprise_planning__projects.bad | join(' | ') }}"
+      when: reprise_planning__projects.bad | length > 0
+
+    - name: Rechercher les exchangeId
+      ansible.builtin.include_tasks: sql_query.yml
+      vars:
+        reprise_planning__sql_label: exchangeId
+        reprise_planning__sql_text: |
+          SELECT DISTINCT 'ROW|' || SUBSTR(TRIM(bjep.STRING_VAL), {{ reprise_planning_exchange_id_offset | int }})
+          FROM batch_job_execution_params bjep
+          WHERE bjep.KEY_NAME = 'exchangeId'
+            AND bjep.job_execution_id IN ({{ reprise_planning__in_list }});
+
+    - name: Analyser les exchangeId
+      ansible.builtin.set_fact:
+        reprise_planning__elements: "{{ reprise_planning__sql_rows | reject('equalto', '') | unique | list }}"
+
+    - name: Arrêter si un exchangeId contient des caractères inattendus
+      ansible.builtin.fail:
+        msg: "exchangeId inattendu(s) : {{ reprise_planning__elements | reject('match', reprise_planning__element_regex) | join(' | ') }}"
+      when: reprise_planning__elements | reject('match', reprise_planning__element_regex) | list | length > 0
+
+#############################################################################
+# Répertoires « en cours » : rejeu ou archivage
+#############################################################################
+- name: Répertoires concernés
+  when: reprise_planning__elements | default([]) | length > 0
+  block:
+    - name: Rechercher les répertoires en cours
+      ansible.builtin.find:
+        paths: "{{ reprise_planning_encours_dir }}"
+        file_type: directory
+        recurse: true
+        hidden: true
+        patterns: >-
+          {{ (reprise_planning__elements + (reprise_planning__elements | map('regex_replace', '_[^_]*$', '') | list))
+             | unique | map('regex_replace', '^|$', '*') | list }}
+      register: reprise_planning__encours
+
+    - name: Rechercher les fichiers présents dans le répertoire d'entrée
+      ansible.builtin.find:
+        paths: "{{ reprise_planning_input_dir }}"
+        file_type: file
+        recurse: true
+        hidden: true
+        patterns: >-
+          {{ reprise_planning__elements | map('regex_replace', '_[^_]*$', '') | unique
+             | map('regex_replace', '^|$', '*') | list }}
+      register: reprise_planning__inputs
+
+    # Même règle que le script :
+    #  - un fichier plus récent du projet est déjà en entrée -> archiver le répertoire en cours du projet
+    #  - sinon -> remettre le contenu du répertoire en cours de l'échange en entrée (rejeu)
+    - name: Décider de l'action pour chaque échange
+      ansible.builtin.set_fact:
+        reprise_planning__decisions: >-
+          {%- set dirs = reprise_planning__encours.files | map(attribute='path') | sort -%}
+          {%- set inputs = reprise_planning__inputs.files | map(attribute='path') | map('basename') | list -%}
+          {%- set ns = namespace(archive=[], rejeu=[], details=[]) -%}
+          {%- for e in reprise_planning__elements -%}
+            {%- set p = e | regex_replace('_[^_]*$', '') -%}
+            {%- set m = namespace(elem=[], pref=[], inp=false) -%}
+            {%- for d in dirs -%}
+              {%- if e in (d | basename) -%}{%- set m.elem = m.elem + [d] -%}{%- endif -%}
+              {%- if p in (d | basename) -%}{%- set m.pref = m.pref + [d] -%}{%- endif -%}
+            {%- endfor -%}
+            {%- for i in inputs -%}
+              {%- if p in i -%}{%- set m.inp = true -%}{%- endif -%}
+            {%- endfor -%}
+            {%- if m.inp and m.elem | length > 0 -%}
+              {%- if m.pref | length > 0 -%}
+                {%- set ns.archive = ns.archive + [m.pref[0]] -%}
+                {%- set ns.details = ns.details + [{'element': e, 'action': 'archivage', 'dir': m.pref[0]}] -%}
+              {%- endif -%}
+            {%- elif m.elem | length > 0 -%}
+              {%- set ns.rejeu = ns.rejeu + [m.elem[0]] -%}
+              {%- set ns.details = ns.details + [{'element': e, 'action': 'rejeu', 'dir': m.elem[0]}] -%}
+            {%- else -%}
+              {%- set ns.details = ns.details + [{'element': e, 'action': 'aucune', 'dir': ''}] -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ {'archive': ns.archive | unique | sort, 'rejeu': ns.rejeu | unique | sort, 'details': ns.details} }}
+
+    - name: Lister le contenu des répertoires à rejouer
+      ansible.builtin.find:
+        paths: "{{ reprise_planning__decisions.rejeu }}"
+        file_type: any
+        recurse: false
+        hidden: true
+      register: reprise_planning__rejeu_items
+      when: reprise_planning__decisions.rejeu | length > 0
+
+    - name: Lister le répertoire d'entrée (détection des conflits de noms)
+      ansible.builtin.find:
+        paths: "{{ reprise_planning_input_dir }}"
+        file_type: any
+        recurse: false
+        hidden: true
+      register: reprise_planning__input_top
+      when: reprise_planning__decisions.rejeu | length > 0
+
+    - name: Vérifier les destinations d'archivage
+      ansible.builtin.stat:
+        path: "{{ reprise_planning_archive_dir }}/{{ item | basename }}"
+      loop: "{{ reprise_planning__decisions.archive }}"
+      register: reprise_planning__archive_dest
+
+#############################################################################
+# Plan final et contrôles de cohérence (avant toute modification)
+#############################################################################
+- name: Construire le plan
+  ansible.builtin.set_fact:
+    reprise_planning__plan: >-
+      {%- set d = reprise_planning__decisions | default({'archive': [], 'rejeu': [], 'details': []}) -%}
+      {%- set items = reprise_planning__rejeu_items.files | default([]) | map(attribute='path') | sort -%}
+      {%- set archive = [] -%}
+      {%- for a in d.archive -%}
+        {%- set _ = archive.append({'src': a, 'dest': reprise_planning_archive_dir ~ '/' ~ (a | basename)}) -%}
+      {%- endfor -%}
+      {%- set moves = [] -%}
+      {%- for i in items -%}
+        {%- set _ = moves.append({'src': i, 'dest': reprise_planning_input_dir ~ '/' ~ (i | basename)}) -%}
+      {%- endfor -%}
+      {%- set p = reprise_planning__projects | default({'updates': [], 'skipped': []}) -%}
+      {{ {'archive': archive, 'moves': moves, 'rejeu_dirs': d.rejeu, 'details': d.details,
+          'updates': p.updates, 'skipped': p.skipped} }}
+
+- name: Contrôler la cohérence du plan
+  ansible.builtin.set_fact:
+    reprise_planning__conflicts: >-
+      {%- set c = [] -%}
+      {%- set pl = reprise_planning__plan -%}
+      {%- set existing = reprise_planning__input_top.files | default([]) | map(attribute='path') | map('basename') | list -%}
+      {%- for m in pl.moves -%}
+        {%- if (m.src | basename) in existing -%}
+          {%- set _ = c.append('Rejeu : ' ~ (m.src | basename) ~ ' existe déjà dans ' ~ reprise_planning_input_dir) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- set names = pl.moves | map(attribute='src') | map('basename') | list -%}
+      {%- for n in names | unique -%}
+        {%- if names | select('equalto', n) | list | length > 1 -%}
+          {%- set _ = c.append('Rejeu : plusieurs éléments nommés ' ~ n ~ ' seraient déplacés vers ' ~ reprise_planning_input_dir) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- for r in reprise_planning__archive_dest.results | default([]) -%}
+        {%- if r.stat is defined and r.stat.exists -%}
+          {%- set _ = c.append('Archivage : ' ~ r.stat.path ~ ' existe déjà') -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- for a in pl.archive | map(attribute='src') -%}
+        {%- if a in pl.rejeu_dirs -%}
+          {%- set _ = c.append('Répertoire à la fois à archiver et à rejouer : ' ~ a) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- set codes = pl.updates | map(attribute='code') | list -%}
+      {%- for code in codes | unique -%}
+        {%- if codes | select('equalto', code) | list | length > 1 -%}
+          {%- set _ = c.append('Projet ' ~ code ~ ' : plusieurs séquences en cours, mise à jour ambiguë') -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ c }}
+
+- name: Afficher le plan
+  ansible.builtin.debug:
+    msg: >-
+      {%- set pl = reprise_planning__plan -%}
+      {%- set out = ['[ÉTAPE 1/3] Exécutions retenues : ' ~ reprise_planning__ids.keep | length] -%}
+      {%- for e in reprise_planning__ids.keep -%}{%- set _ = out.append('  --> Job ' ~ e.id ~ ' (projet ' ~ e.project ~ ')') -%}{%- endfor -%}
+      {%- for e in reprise_planning__exec.dropped -%}
+        {%- set _ = out.append('  [ignoré] Job ' ~ e.id ~ ' : doublon du projet ' ~ e.project ~ ', seul le plus récent est traité') -%}
+      {%- endfor -%}
+      {%- for e in reprise_planning__ids.nolog -%}
+        {%- set _ = out.append('  [ignoré] Job ' ~ e.id ~ ' : pas de log inactif depuis plus de ' ~ reprise_planning_inactivity_minutes ~ ' min') -%}
+      {%- endfor -%}
+      {%- set _ = out.append('[ÉTAPE 2/3] Projets à redresser : ' ~ pl.updates | length) -%}
+      {%- for u in pl.updates -%}
+        {%- set _ = out.append('  ' ~ u.code ~ ' : séquence ' ~ u.old ~ ' -> ' ~ u.new ~ ', statut EN-COURS -> FINI') -%}
+      {%- endfor -%}
+      {%- for s in pl.skipped -%}
+        {%- set _ = out.append('  [ignoré] ' ~ s.code ~ ' : statut ' ~ s.statut ~ ' (seuls les projets EN-COURS sont mis à jour)') -%}
+      {%- endfor -%}
+      {%- set _ = out.append('[ÉTAPE 3/3] Actions sur les fichiers') -%}
+      {%- for r in pl.rejeu_dirs -%}
+        {%- set n = pl.moves | selectattr('src', 'match', '^' ~ (r | regex_escape) ~ '/') | list | length -%}
+        {%- set _ = out.append('  [REJEU] ' ~ r ~ ' : ' ~ n ~ ' élément(s) -> ' ~ reprise_planning_input_dir) -%}
+      {%- endfor -%}
+      {%- for a in pl.archive -%}
+        {%- set _ = out.append('  [ARCHIVAGE] ' ~ a.src ~ ' -> ' ~ reprise_planning_archive_dir) -%}
+      {%- endfor -%}
+      {%- for d in pl.details | selectattr('action', 'equalto', 'aucune') -%}
+        {%- set _ = out.append('  [aucune action] échange ' ~ d.element ~ ' : pas de répertoire en cours') -%}
+      {%- endfor -%}
+      {%- if pl.archive | length + pl.rejeu_dirs | length == 0 -%}{%- set _ = out.append('  (aucun fichier à déplacer)') -%}{%- endif -%}
+      {%- for c in reprise_planning__conflicts -%}{%- set _ = out.append('  [CONFLIT] ' ~ c) -%}{%- endfor -%}
+      {{ out }}
+
+- name: Arrêter en cas de conflit (rien n'a été modifié)
+  ansible.builtin.fail:
+    msg: "Plan incohérent, aucune modification effectuée : {{ reprise_planning__conflicts | join(' ### ') }}"
+  when: reprise_planning__conflicts | length > 0
+
+- name: Déterminer s'il y a des actions à effectuer
+  ansible.builtin.set_fact:
+    reprise_planning__has_actions: >-
+      {{ (reprise_planning__plan.updates | length + reprise_planning__plan.archive | length
+          + reprise_planning__plan.rejeu_dirs | length) > 0 }}

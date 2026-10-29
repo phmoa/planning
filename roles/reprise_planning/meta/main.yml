@@ -2,7 +2,7 @@
 galaxy_info:
   role_name: reprise_planning
   author: melbour
-  description: Déploie et exécute le script de reprise des plannings bloqués
+  description: Reprise des plannings bloqués (exécutions Spring Batch, séquences GPAT, répertoires en cours)
   license: proprietary
   min_ansible_version: "2.14"
   platforms:

@@ -18,25 +18,21 @@
       - reprise_planning_db_password | string | length > 0
       - reprise_planning_db_password != 'CHANGE_ME'
       - reprise_planning_db_tns != 'CHANGE_ME'
-      - reprise_planning_timeout | int > 0
+      - reprise_planning_db_privilege | upper in ['', 'SYSDBA', 'SYSOPER', 'SYSBACKUP', 'SYSDG', 'SYSKM', 'SYSRAC']
+      - reprise_planning_db_schema == '' or reprise_planning_db_schema is match('^[A-Za-z][A-Za-z0-9_$#]{0,127}$')
+      - reprise_planning_min_age_hours | int > 0
+      - reprise_planning_inactivity_minutes | int > 0
+      - reprise_planning_exchange_id_offset | int > 0
+      - reprise_planning_sql_timeout | int > 0
       - reprise_planning_db_check_timeout | int > 0
+      - reprise_planning_lock_max_age_minutes | int > 0
       - reprise_planning_oracle_env is mapping
-      - reprise_planning_required_dirs is sequence
+      - reprise_planning_lock_path is match('^/')
     fail_msg: >-
       Paramètre invalide (voir la condition en échec ci-dessus).
       Identifiants : vault_reprise_planning_db_* dans vars/{{ env_name | default('<env>') }}/vault.yml
       (absents ou encore à CHANGE_ME).
     quiet: true
-
-- name: Vérifier l'interpréteur {{ reprise_planning_shell }}
-  ansible.builtin.stat:
-    path: "{{ reprise_planning_shell }}"
-  register: reprise_planning__shell
-
-- name: Arrêter si l'interpréteur est absent
-  ansible.builtin.fail:
-    msg: "Interpréteur introuvable ou non exécutable sur {{ inventory_hostname }} : {{ reprise_planning_shell }}"
-  when: not (reprise_planning__shell.stat.exists and reprise_planning__shell.stat.executable)
 
 # "command -v" est une commande interne du shell : le module shell est nécessaire
 - name: Vérifier les commandes nécessaires
@@ -44,10 +40,13 @@
   loop:
     - sqlplus
     - timeout
+    - mv
+    - rmdir
   environment: "{{ reprise_planning_oracle_env }}"
   register: reprise_planning__tools
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Arrêter si une commande est introuvable
   ansible.builtin.fail:
@@ -61,7 +60,7 @@
 - name: Vérifier les répertoires de travail
   ansible.builtin.stat:
     path: "{{ item.path }}"
-  loop: "{{ reprise_planning_required_dirs }}"
+  loop: "{{ reprise_planning__required_dirs }}"
   loop_control:
     label: "{{ item.path }}"
   register: reprise_planning__dirs
@@ -71,20 +70,21 @@
     msg: >-
       {{ item.item.path }} :
       {% if not item.stat.exists %}introuvable
-      {% elif not item.stat.isdir %}n'est pas un répertoire
-      {% else %}non accessible en écriture pour {{ ansible_user_id | default("le compte d'exécution") }}{% endif %}
+      {%- elif not item.stat.isdir %}n'est pas un répertoire
+      {%- elif not item.stat.readable %}non lisible
+      {%- else %}non accessible en écriture{% endif %}
   loop: "{{ reprise_planning__dirs.results }}"
   loop_control:
     label: "{{ item.item.path }}"
   when: >-
     not item.stat.exists
     or not item.stat.isdir
-    or ((item.item.writable | default(false) | bool) and not item.stat.writeable)
+    or not item.stat.readable
+    or ((item.item.writable | bool) and not item.stat.writeable)
 
 - name: Tester la connexion Oracle et les droits sur les tables
   when: reprise_planning_db_check | bool
   block:
-    # Le mot de passe passe par stdin, pas par la ligne de commande.
     # Aucune donnée n'est lue ni modifiée (ROWNUM < 1), puis ROLLBACK.
     - name: Se connecter à la base et vérifier les tables
       ansible.builtin.command:
@@ -96,9 +96,7 @@
           - -L
           - /nolog
         stdin: |
-          WHENEVER SQLERROR EXIT FAILURE ROLLBACK
-          WHENEVER OSERROR EXIT FAILURE ROLLBACK
-          CONNECT {{ reprise_planning__connect_string }}
+          {{ reprise_planning__sql_header }}
           SELECT 'CONNEXION_OK' FROM dual;
           {% for t in reprise_planning__tables_read %}
           SELECT COUNT(*) FROM {{ t }} WHERE ROWNUM < 1;
@@ -111,6 +109,7 @@
       register: reprise_planning__db
       changed_when: false
       failed_when: false
+      check_mode: false
       no_log: true
 
     - name: Arrêter si la connexion ou l'accès aux tables échoue
@@ -118,21 +117,20 @@
         reprise_planning__db_errors: >-
           {{ (reprise_planning__db.stdout_lines | default([]) + reprise_planning__db.stderr_lines | default([]))
              | select('search', reprise_planning__ora_regex) | map('trim') | unique | list }}
-        reprise_planning__db_target: >-
-          utilisateur {{ reprise_planning_db_user }},
-          base {{ reprise_planning_db_tns if reprise_planning_db_tns | length > 0 else 'ORACLE_SID' }}
       ansible.builtin.fail:
         msg: >-
           {%- set out = reprise_planning__db.stdout | default('') -%}
           {%- if 'CONNEXION_OK' not in out -%}Connexion Oracle impossible
           {%- else -%}Connexion OK mais accès refusé à une table{%- endif %}
-          ({{ reprise_planning__db_target }}) :
+          (utilisateur {{ reprise_planning_db_user }}
+          {{- (' AS ' ~ reprise_planning_db_privilege | upper) if reprise_planning_db_privilege | length > 0 else '' }},
+          base {{ reprise_planning_db_tns if reprise_planning_db_tns | length > 0 else 'ORACLE_SID' }}) :
           {% if reprise_planning__db.rc | default(-1) == 124 -%}
           délai de {{ reprise_planning_db_check_timeout }} s dépassé (listener ou réseau injoignable).
           {%- elif reprise_planning__db_errors | length > 0 -%}
           {{ reprise_planning__db_errors | join(' | ') }}.
-          {%- if 'CONNEXION_OK' in out %} Tables vérifiées :
-          {{ reprise_planning__tables_read | join(', ') }} (lecture), {{ reprise_planning__table_update }} (mise à jour).
+          {%- if 'ORA-00942' in reprise_planning__db_errors | join(' ') %}
+          Si les tables appartiennent à un autre schéma, renseigner reprise_planning_db_schema.
           {%- endif -%}
           {%- else -%}
           code retour {{ reprise_planning__db.rc | default('n/a') }} {{ reprise_planning__db.msg | default('') }}
