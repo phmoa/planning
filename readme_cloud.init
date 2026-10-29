@@ -1,0 +1,158 @@
+# Configuration firewalld : zone admin et accès SSH sur ens161
+
+## Clavier FR
+
+Passer le clavier en AZERTY pour la session en cours :
+```bash
+loadkeys fr
+```
+
+Pour que ce soit permanent, y compris après redémarrage :
+```bash
+sudo localectl set-keymap fr
+```
+
+## Configuration cloud-init
+
+Éditer le fichier `/etc/cloud/cloud.cfg` :
+```bash
+sudo vi /etc/cloud/cloud.cfg
+```
+
+Vérifier que les variables suivantes sont renseignées :
+```yaml
+disable_root: true
+ssh_pwauth: false
+```
+
+Ajouter la ligne :
+```yaml
+network: {config: disabled}
+```
+
+Mettre en commentaire la ligne suivante :
+```yaml
+#disable_vmware_customization: false
+```
+
+Vérification :
+```bash
+grep -E 'disable_root|ssh_pwauth|network:|disable_vmware_customization' /etc/cloud/cloud.cfg
+```
+
+Réinitialiser cloud-init :
+```bash
+sudo cloud-init clean
+```
+
+## Objectif
+1. Supprimer toutes les règles nftables et désactiver le service `nftables`.
+2. Gérer le pare-feu uniquement avec firewalld : créer la zone `admin`, y attacher `ens161` et autoriser SSH.
+3. Rendre l'affectation de `ens161` persistante via NetworkManager.
+
+## Prérequis
+- Accès root ou sudo.
+- Accès par la **console vCenter**, car la machine n'a plus aucun filtrage pendant quelques secondes et les sessions SSH peuvent être coupées.
+- Système : AlmaLinux 8/9 avec NetworkManager.
+
+> ⚠️ firewalld utilise nftables comme moteur interne. On supprime les règles et on désactive le **service** `nftables.service`, mais on ne **désinstalle pas** le paquet `nftables`, sinon firewalld ne fonctionnera plus.
+
+## Étape 1 : Supprimer les règles nftables
+
+Sauvegarder les règles actuelles, puis les supprimer :
+```bash
+sudo nft list ruleset > /root/nftables-ruleset.bak
+sudo nft flush ruleset
+```
+
+Vider le fichier de configuration du service pour qu'aucune règle ne soit rechargée :
+```bash
+sudo cp /etc/sysconfig/nftables.conf /etc/sysconfig/nftables.conf.bak
+sudo truncate -s 0 /etc/sysconfig/nftables.conf
+```
+
+Vérification :
+```bash
+sudo nft list ruleset    # attendu : aucune sortie
+```
+
+## Étape 2 : Désactiver le service nftables
+
+```bash
+sudo systemctl stop nftables
+sudo systemctl disable nftables
+sudo systemctl mask nftables
+```
+
+Vérification :
+```bash
+systemctl is-enabled nftables    # attendu : masked
+systemctl is-active nftables     # attendu : inactive
+```
+
+## Étape 3 : Démarrer firewalld
+
+Le redémarrage recrée les règles de firewalld supprimées à l'étape 1 :
+```bash
+sudo systemctl enable firewalld
+sudo systemctl restart firewalld
+sudo firewall-cmd --state        # attendu : running
+```
+
+## Étape 4 : Créer la zone admin et autoriser SSH
+
+```bash
+sudo firewall-cmd --permanent --new-zone=admin
+sudo firewall-cmd --permanent --zone=admin --add-service=ssh
+sudo firewall-cmd --permanent --zone=admin --change-interface=ens161
+sudo firewall-cmd --reload
+```
+
+Vérification :
+```bash
+sudo firewall-cmd --zone=admin --list-all
+```
+Résultat attendu : `interfaces: ens161` et `services: ssh`.
+
+## Étape 5 : Attacher ens161 à la zone admin via NetworkManager
+
+Sans cette étape, NetworkManager peut remettre l'interface dans la zone par défaut au redémarrage.
+
+```bash
+nmcli -g GENERAL.CONNECTION device show ens161           # récupérer le nom de la connexion
+sudo nmcli connection modify "<nom-connexion>" connection.zone admin
+sudo nmcli connection up "<nom-connexion>"
+```
+
+> ⚠️ `nmcli connection up` redémarre brièvement l'interface `ens161`.
+
+## Étape 6 : Vérifications finales
+
+```bash
+sudo firewall-cmd --get-zone-of-interface=ens161           # attendu : admin
+sudo firewall-cmd --get-active-zones
+nmcli -g connection.zone connection show "<nom-connexion>" # attendu : admin
+sudo nft list tables                                        # attendu : uniquement « table inet firewalld »
+sudo ss -tlnp | grep :22                                   # sshd à l'écoute
+```
+
+Test depuis un poste client :
+```bash
+ssh <utilisateur>@<ip-ens161>
+```
+
+## Dépannage
+
+| Symptôme | Cause probable | Action |
+|---|---|---|
+| `Connection refused` alors que `ens161` est dans `admin` | Routage asymétrique : la réponse repart par une autre interface | Vérifier `ip route get <ip-client>`, qui doit indiquer `dev ens161`. Sinon : `nmcli connection modify "<nom-connexion>" +ipv4.routes "<réseau-client>/<masque> <passerelle-ens161>"` |
+| `ens161` revient dans `public` après redémarrage | Zone non définie dans NetworkManager | Refaire l'étape 5 |
+| Message « under control of NetworkManager » | NetworkManager gère la zone de l'interface | Passer par `nmcli` (étape 5) |
+| D'autres tables que `inet firewalld` apparaissent | Règles rechargées par un autre outil (iptables, libvirt, etc.) | Identifier la source avec `sudo nft list ruleset` |
+
+## Retour arrière
+```bash
+sudo systemctl unmask nftables
+sudo cp /etc/sysconfig/nftables.conf.bak /etc/sysconfig/nftables.conf
+sudo nft -f /root/nftables-ruleset.bak
+```
